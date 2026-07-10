@@ -31,6 +31,14 @@ public class ConversationList.ModelTest : TestCase {
             "filter_updates_when_conversation_flags_change",
             filter_updates_when_conversation_flags_change
         );
+        add_test(
+            "filter_retains_selected_conversation_until_selection_changes",
+            filter_retains_selected_conversation_until_selection_changes
+        );
+        add_test(
+            "filter_does_not_retain_selected_conversation_when_deleted",
+            filter_does_not_retain_selected_conversation_when_deleted
+        );
     }
 
     public override void set_up() {
@@ -131,6 +139,65 @@ public class ConversationList.ModelTest : TestCase {
 
         assert_equal<uint?>(this.model.get_n_items(), 1);
         assert(this.model.get_item(0) == conversation);
+    }
+
+    public void filter_retains_selected_conversation_until_selection_changes()
+        throws GLib.Error {
+        Geary.App.Conversation first = load_conversation(1, true, false);
+        Geary.App.Conversation second = load_conversation(2, true, false);
+        Geary.Email first_email = Geary.Collection.first(
+            first.get_emails(Geary.App.Conversation.Ordering.NONE)
+        );
+
+        this.source.add_conversations(collection(first, second));
+        this.model.filter_mode = ConversationList.FilterMode.UNREAD;
+        this.model.retained_conversation = first;
+
+        int item_changes = 0;
+        this.model.items_changed.connect(() => { item_changes++; });
+
+        first_email.set_flags(new Geary.EmailFlags());
+        first.email_flags_changed(first_email);
+        this.source.remove_conversations(Geary.Collection.single(first));
+
+        assert_equal<uint?>(this.model.get_n_items(), 2);
+        assert_equal<int?>(item_changes, 0);
+        assert(model_contains(first));
+        assert(this.model.get_source_folder(first) == first.base_folder);
+        assert_equal(
+            this.model.get_account_context(first),
+            first.base_folder.account.information.display_name
+        );
+
+        this.model.retained_conversation = second;
+
+        assert_equal<uint?>(this.model.get_n_items(), 1);
+        assert_equal<int?>(item_changes, 1);
+        assert(!model_contains(first));
+        assert(model_contains(second));
+    }
+
+    public void filter_does_not_retain_selected_conversation_when_deleted()
+        throws GLib.Error {
+        Geary.App.Conversation conversation = load_conversation(1, true, false);
+
+        this.source.add_conversations(Geary.Collection.single(conversation));
+        this.model.filter_mode = ConversationList.FilterMode.UNREAD;
+        this.model.retained_conversation = conversation;
+        this.source.remove_conversations(
+            Geary.Collection.single(conversation)
+        );
+
+        assert_equal<uint?>(this.model.get_n_items(), 0);
+    }
+
+    private bool model_contains(Geary.App.Conversation conversation) {
+        for (uint i = 0; i < this.model.get_n_items(); i++) {
+            if (this.model.get_item(i) == conversation) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Geary.App.Conversation load_conversation(int id,
@@ -243,10 +310,14 @@ public class ConversationList.ModelTest : TestCase {
         public int min_window_count { get; set; default = 0; }
         public bool can_load_more { get { return false; } }
 
+        private Gee.Set<Geary.App.Conversation> removed =
+            new Gee.HashSet<Geary.App.Conversation>();
+
 
         public Geary.Folder get_source_folder(
             Geary.App.Conversation conversation
         ) {
+            GLib.assert(!this.removed.contains(conversation));
             return conversation.base_folder;
         }
 
@@ -255,12 +326,14 @@ public class ConversationList.ModelTest : TestCase {
         }
 
         public string get_account_context(Geary.App.Conversation conversation) {
+            GLib.assert(!this.removed.contains(conversation));
             return conversation.base_folder.account.information.display_name;
         }
 
         public void add_conversations(
             Gee.Collection<Geary.App.Conversation> conversations
         ) {
+            this.removed.remove_all(conversations);
             conversations_added(conversations);
         }
 
@@ -273,6 +346,7 @@ public class ConversationList.ModelTest : TestCase {
             Gee.Collection<Geary.App.Conversation> conversations
         ) {
             conversations_removed(conversations);
+            this.removed.add_all(conversations);
         }
 
     }

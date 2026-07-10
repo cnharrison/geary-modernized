@@ -566,6 +566,18 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
         this.list.unselect_all();
     }
 
+    private void update_retained_conversation(
+        Gee.Set<Geary.App.Conversation> selection
+    ) {
+        Geary.App.Conversation? retained = null;
+        if (this.filter_mode != ALL && selection.size == 1) {
+            retained = selection.to_array()[0];
+        }
+        if (this.model != null) {
+            this.model.retained_conversation = retained;
+        }
+    }
+
     private bool selection_changed(Gee.Set<Geary.App.Conversation> selection) {
         bool changed = this.selected.size != selection.size;
         if (changed) {
@@ -917,6 +929,7 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
         }
 
         this.selected = selected;
+        update_retained_conversation(selected);
         if (this.selected.size > 0 || this.to_restore_row == null) {
             conversations_selected(
                 this.selected,

@@ -18,12 +18,33 @@ public class ConversationList.Model : Object, ListModel {
     private GLib.GenericArray<Geary.App.Conversation> loaded_items = new GLib.GenericArray<Geary.App.Conversation>();
     private Gee.List<FlagSignalBinding> flag_signal_bindings =
         new Gee.ArrayList<FlagSignalBinding>();
+    private Geary.Folder? retained_source_folder = null;
+    private string? retained_account_context = null;
     internal ConversationSource source { get; set; }
+
+    internal Geary.App.Conversation? retained_conversation {
+        get { return this._retained_conversation; }
+        set {
+            if (this._retained_conversation != value) {
+                bool rebuild = (
+                    this._retained_conversation != null &&
+                    !matches_filter_mode(this._retained_conversation)
+                ) || (value != null && !matches_filter_mode(value));
+                release_retained_conversation();
+                this._retained_conversation = value;
+                if (rebuild) {
+                    rebuild_items();
+                }
+            }
+        }
+    }
+    private Geary.App.Conversation? _retained_conversation = null;
 
     public FilterMode filter_mode {
         get { return this._filter_mode; }
         set {
             if (this._filter_mode != value) {
+                release_retained_conversation();
                 this._filter_mode = value;
                 rebuild_items();
                 notify_property("filter-mode");
@@ -65,10 +86,19 @@ public class ConversationList.Model : Object, ListModel {
     public signal void conversation_updated(Geary.App.Conversation convo);
 
     internal Geary.Folder get_source_folder(Geary.App.Conversation conversation) {
+        if (conversation == this._retained_conversation &&
+            this.retained_source_folder != null) {
+            return this.retained_source_folder;
+        }
         return this.source.get_source_folder(conversation);
     }
 
     internal string get_account_context(Geary.App.Conversation conversation) {
+        if (conversation == this._retained_conversation &&
+            this.retained_source_folder != null) {
+            assert(this.retained_account_context != null);
+            return this.retained_account_context;
+        }
         return this.source.get_account_context(conversation);
     }
 
@@ -130,6 +160,10 @@ public class ConversationList.Model : Object, ListModel {
         }
 
         if (this.loaded_items.find(convo)) {
+            if (convo == this._retained_conversation &&
+                this.retained_source_folder != null) {
+                clear_retained_source();
+            }
             return false;
         }
 
@@ -140,6 +174,11 @@ public class ConversationList.Model : Object, ListModel {
     }
 
     private bool matches_filter(Geary.App.Conversation conversation) {
+        return conversation == this._retained_conversation ||
+            matches_filter_mode(conversation);
+    }
+
+    private bool matches_filter_mode(Geary.App.Conversation conversation) {
         switch (this.filter_mode) {
         case ALL:
             return true;
@@ -155,19 +194,66 @@ public class ConversationList.Model : Object, ListModel {
         }
     }
 
+    private void release_retained_conversation() {
+        Geary.App.Conversation? retained = this._retained_conversation;
+        bool remove = this.retained_source_folder != null;
+
+        this._retained_conversation = null;
+        clear_retained_source();
+
+        if (remove && retained != null) {
+            remove_conversation(retained);
+        }
+    }
+
+    private void clear_retained_source() {
+        this.retained_source_folder = null;
+        this.retained_account_context = null;
+    }
+
+    private bool remove_conversation(Geary.App.Conversation conversation) {
+        if (!this.loaded_items.remove(conversation)) {
+            return false;
+        }
+
+        disconnect_conversation(conversation);
+        if (conversation == this._retained_conversation) {
+            this._retained_conversation = null;
+            clear_retained_source();
+        }
+        return true;
+    }
+
     private void rebuild_items() {
-        uint old_count = this.items.length;
-        this.items = new GLib.GenericArray<Geary.App.Conversation>();
+        GLib.GenericArray<Geary.App.Conversation> old_items = this.items;
+        var new_items = new GLib.GenericArray<Geary.App.Conversation>();
         for (uint i = 0; i < this.loaded_items.length; i++) {
             Geary.App.Conversation conversation = this.loaded_items.get(i);
             if (matches_filter(conversation)) {
-                this.items.add(conversation);
+                new_items.add(conversation);
             }
         }
-        this.items.sort(compare);
+        new_items.sort(compare);
 
-        if (old_count > 0 || this.items.length > 0) {
-            this.items_changed(0, old_count, this.items.length);
+        uint prefix = 0;
+        while (prefix < old_items.length && prefix < new_items.length &&
+               old_items.get(prefix) == new_items.get(prefix)) {
+            prefix++;
+        }
+
+        uint suffix = 0;
+        while (suffix < old_items.length - prefix &&
+               suffix < new_items.length - prefix &&
+               old_items.get(old_items.length - suffix - 1) ==
+                   new_items.get(new_items.length - suffix - 1)) {
+            suffix++;
+        }
+
+        this.items = new_items;
+        uint removed = old_items.length - prefix - suffix;
+        uint added = new_items.length - prefix - suffix;
+        if (removed > 0 || added > 0) {
+            this.items_changed(prefix, removed, added);
         }
     }
 
@@ -253,8 +339,13 @@ public class ConversationList.Model : Object, ListModel {
 
         var removed = 0;
         foreach (Geary.App.Conversation convo in conversations) {
-            if (this.loaded_items.remove(convo)) {
-                disconnect_conversation(convo);
+            if (convo == this._retained_conversation &&
+                !matches_filter_mode(convo)) {
+                if (this.retained_source_folder == null) {
+                    this.retained_source_folder = this.source.get_source_folder(convo);
+                    this.retained_account_context = this.source.get_account_context(convo);
+                }
+            } else if (remove_conversation(convo)) {
                 removed++;
             }
         }
