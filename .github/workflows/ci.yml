@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Fedora build and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: fedora:latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_DIR: _build
+      LC_ALL: C.UTF-8
+    steps:
+      - name: Install build dependencies
+        run: >-
+          dnf install --assumeyes --setopt=install_weak_deps=False
+          appstream
+          dbus-daemon
+          dconf
+          desktop-file-utils
+          enchant2-devel
+          folks-devel
+          gcc
+          gcr-devel
+          gettext
+          git
+          glib-networking
+          glib2-devel
+          glibc-langpack-en
+          gmime30-devel
+          gnome-online-accounts-devel
+          gnutls-utils
+          gsettings-desktop-schemas
+          gsound-devel
+          gspell-devel
+          gtk3-devel
+          iso-codes-devel
+          itstool
+          json-glib-devel
+          libgee-devel
+          libhandy1-devel
+          libicu-devel
+          libpeas-devel
+          libsecret-devel
+          libstemmer-devel
+          libunwind-devel
+          libxml2-devel
+          libytnef-devel
+          make
+          meson
+          ninja-build
+          pinentry-gnome3
+          pkgconf-pkg-config
+          sqlite-devel
+          vala
+          webkit2gtk4.1-devel
+          xorg-x11-server-Xvfb
+
+      - name: Check out source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Configure
+        run: >-
+          meson setup
+          --buildtype=debug
+          -Dprofile=development
+          -Dvaladoc=disabled
+          "$BUILD_DIR"
+
+      - name: Build
+        run: meson compile -C "$BUILD_DIR"
+
+      - name: Test
+        run: >-
+          xvfb-run -a dbus-run-session --
+          meson test
+          --verbose
+          --no-stdsplit
+          --num-processes 1
+          -C "$BUILD_DIR"
+          -t 10
+
+      - name: Verify localization extraction
+        run: meson compile -C "$BUILD_DIR" geary-pot
+
+      - name: Verify repository cleanliness
+        run: |
+          rm -rf "$BUILD_DIR"
+          rm -f po/geary.pot subprojects/.wraplock
+          test -z "$(git status --short)"
