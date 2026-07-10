@@ -86,6 +86,8 @@ public class Geary.Imap.ClientConnection : BaseObject, Logging.Source {
     private TimeoutManager idle_timer;
 
     private GLib.Cancellable? open_cancellable = null;
+    private Geary.Nonblocking.Semaphore send_loop_stopped =
+        new Geary.Nonblocking.Semaphore();
 
 
     public virtual signal void sent_command(Command cmd) {
@@ -352,6 +354,7 @@ public class Geary.Imap.ClientConnection : BaseObject, Logging.Source {
 
         // Start this running in the "background", it will stop when
         // open_cancellable is cancelled
+        this.send_loop_stopped.reset();
         this.send_loop.begin();
     }
 
@@ -360,6 +363,8 @@ public class Geary.Imap.ClientConnection : BaseObject, Logging.Source {
         // Cancel all current and pending commands because the
         // underlying streams are going away.
         this.open_cancellable.cancel();
+        // Do not close the serializer while it has an async flush in flight.
+        yield this.send_loop_stopped.wait_async();
         foreach (Command sent in this.sent_queue) {
             debug("Cancelling sent command: %s", sent.to_brief_string());
             sent.disconnected("Connection channels closed");
@@ -431,6 +436,7 @@ public class Geary.Imap.ClientConnection : BaseObject, Logging.Source {
                 }
             }
         }
+        this.send_loop_stopped.blind_notify();
     }
 
     // Only ever call this from flush_commands, to ensure serial

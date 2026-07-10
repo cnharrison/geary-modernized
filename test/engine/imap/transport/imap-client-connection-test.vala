@@ -16,12 +16,27 @@ class Geary.Imap.ClientConnectionTest : TestCase {
 
     }
 
+    private class FlushingCommand : TestCommand {
+
+        public signal void flushing();
+
+        internal override async void send(Serializer serializer,
+                                          GLib.Cancellable cancellable)
+            throws GLib.Error {
+            yield base.send(serializer, cancellable);
+            flushing();
+            yield serializer.flush_stream(cancellable);
+        }
+
+    }
+
     private TestServer? server = null;
 
 
     public ClientConnectionTest() {
         base("Geary.Imap.ClientConnectionTest");
         add_test("connect_disconnect", connect_disconnect);
+        add_test("disconnect_during_flush", disconnect_during_flush);
         if (GLib.Test.slow()) {
             add_test("idle", idle);
             add_test("command_timeout", command_timeout);
@@ -54,6 +69,31 @@ class Geary.Imap.ClientConnectionTest : TestCase {
 
         TestServer.Result result = this.server.wait_for_script(this.main_loop);
         assert(result.succeeded);
+    }
+
+    public void disconnect_during_flush() throws GLib.Error {
+        this.server.add_script_line(WAIT_FOR_DISCONNECT, "");
+
+        var test_article = new ClientConnection(new_endpoint(), new Quirks());
+        test_article.connect_async.begin(null, this.async_completion);
+        test_article.connect_async.end(async_result());
+
+        bool flushing = false;
+        var command = new FlushingCommand();
+        command.flushing.connect(() => { flushing = true; });
+        test_article.send_command(command);
+        while (!flushing) {
+            this.main_loop.iteration(false);
+        }
+
+        test_article.disconnect_async.begin(null, this.async_completion);
+        test_article.disconnect_async.end(async_result());
+
+        TestServer.Result result = this.server.wait_for_script(this.main_loop);
+        assert_true(
+            result.succeeded,
+            result.error != null ? result.error.message : "Server result failed"
+        );
     }
 
     public void idle() throws GLib.Error {
