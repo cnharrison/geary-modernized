@@ -40,6 +40,8 @@ private class Geary.ImapEngine.ServerSearchEmail : Geary.ImapEngine.AbstractList
         if (uids == null || uids.size == 0)
             return;
 
+        this.completion_uids = uids;
+
         // if the earliest UID is not in the local store, then need to expand vector to it
         Geary.EmailIdentifier? first_id = yield owner.local_folder.get_id_async(uids.first(),
             ImapDB.Folder.ListFlags.NONE, cancellable);
@@ -49,14 +51,18 @@ private class Geary.ImapEngine.ServerSearchEmail : Geary.ImapEngine.AbstractList
         // Convert UIDs into EmailIdentifiers for lookup
         Gee.HashSet<ImapDB.EmailIdentifier> local_ids = new Gee.HashSet<ImapDB.EmailIdentifier>();
         foreach (Imap.UID uid in uids) {
-            // if null, presumably was picked up in the vector expansion (but hasn't been assigned
-            // to the database yet)
-            //
-            // TODO: We need a sparse version of this to scoop them up all at once
+            // If null, the UID was picked up in vector expansion but has
+            // not been assigned to the database yet. Ensure it is fetched
+            // with both the requested and database-required fields.
             ImapDB.EmailIdentifier? id = yield owner.local_folder.get_id_async(uid,
                 ImapDB.Folder.ListFlags.NONE, cancellable);
-            if (id != null)
+            if (id != null) {
                 local_ids.add(id);
+            } else {
+                add_unfulfilled_fields(
+                    uid, get_server_search_new_email_fields(required_fields)
+                );
+            }
         }
 
         Gee.List<Geary.Email>? local_list = yield owner.local_folder.list_email_by_sparse_id_async(
@@ -72,17 +78,25 @@ private class Geary.ImapEngine.ServerSearchEmail : Geary.ImapEngine.AbstractList
         // Convert into fulfilled and unfulfilled email for the base class to complete
         foreach (ImapDB.EmailIdentifier id in map.keys) {
             Geary.Email? email = map.get(id);
-            if (email == null)
-                add_unfulfilled_fields(id.uid, required_fields | ImapDB.Folder.REQUIRED_FIELDS);
-            else if (!email.fields.fulfills(required_fields))
-                add_unfulfilled_fields(id.uid, required_fields.clear(email.fields));
-            else
+            if (email == null) {
+                add_unfulfilled_fields(
+                    id.uid, get_server_search_new_email_fields(required_fields)
+                );
+            } else if (!email.fields.fulfills(required_fields)) {
+                add_unfulfilled_fields(
+                    id.uid, required_fields.clear(email.fields)
+                );
+            } else {
                 accumulator.add(email);
+            }
         }
 
-        // with unfufilled set and fulfilled added to accumulator, let
-        // base class do the rest of the work
+        // With unfulfilled set and fulfilled added to accumulator, let
+        // the base class fetch and store the rest. Vector expansion can
+        // include messages outside the search result, so remove those
+        // from the returned collection after the fetch completes.
         yield base.replay_remote_async(remote);
+        retain_server_search_results(this.accumulator, uids);
     }
 
     public override string describe_state() {

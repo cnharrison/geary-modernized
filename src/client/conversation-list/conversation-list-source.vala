@@ -283,7 +283,9 @@ internal class ConversationList.MonitorSource : Geary.BaseObject, ConversationSo
     }
 
     private Geary.App.ConversationMonitor monitor;
-
+    private Geary.Folder base_folder {
+        get { return this.monitor.base_folder; }
+    }
     internal MonitorSource(Geary.App.ConversationMonitor monitor) {
         this.monitor = monitor;
 
@@ -305,17 +307,17 @@ internal class ConversationList.MonitorSource : Geary.BaseObject, ConversationSo
     }
 
     public Geary.Folder get_source_folder(Geary.App.Conversation conversation) {
-        return this.monitor.base_folder;
+        return this.base_folder;
     }
 
     public Gee.Collection<Geary.Folder> get_source_folders() {
         var folders = new Gee.ArrayList<Geary.Folder>();
-        folders.add(this.monitor.base_folder);
+        folders.add(this.base_folder);
         return folders;
     }
 
     public string get_account_context(Geary.App.Conversation conversation) {
-        return this.monitor.base_folder.account.information.display_name;
+        return this.base_folder.account.information.display_name;
     }
 
     private void on_conversations_added(

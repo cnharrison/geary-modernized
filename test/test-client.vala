@@ -52,9 +52,12 @@ int main(string[] args) {
     client.add_suite(new Application.ShortcutManagerTest().steal_suite());
     client.add_suite(new Application.ShortcutRegistryTest().steal_suite());
     client.add_suite(new Components.WebViewTest().steal_suite());
+    client.add_suite(new Components.ConversationListTriageBarTest().steal_suite());
     client.add_suite(new Components.ValidatorTest().steal_suite());
+    client.add_suite(new ConversationList.ModelTest().steal_suite());
     client.add_suite(new ConversationList.SourceTest().steal_suite());
     client.add_suite(new ConversationList.RowTest().steal_suite());
+    client.add_suite(new ConversationList.ViewTest().steal_suite());
     client.add_suite(new Composer.WebViewTest().steal_suite());
     client.add_suite(new Composer.WidgetTest().steal_suite());
     client.add_suite(new FolderList.ScopeTest().steal_suite());

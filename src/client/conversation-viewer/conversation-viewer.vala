@@ -492,7 +492,8 @@ public class ConversationViewer : Gtk.Stack, Geary.BaseInterface {
                     var conversation_list = main_window.conversation_list_view;
                     if (this.selection_while_composing.is_empty) {
                         conversation_list.conversations_selected(
-                            this.selection_while_composing
+                            this.selection_while_composing,
+                            true
                         );
                     } else {
                         conversation_list.select_conversations(

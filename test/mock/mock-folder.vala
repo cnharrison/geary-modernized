@@ -6,6 +6,7 @@
  */
 
 public class Mock.Folder : Geary.Folder,
+    Geary.FolderSupport.Search,
     ValaUnit.TestAssertions,
     ValaUnit.MockObject {
 
@@ -120,6 +121,18 @@ public class Mock.Folder : Geary.Folder,
             "list_email_by_sparse_id_async",
             {ids, box_arg(required_fields), box_arg(flags), cancellable},
             null
+        );
+    }
+
+    public async Gee.Collection<Geary.Email> search_flag_async(
+        Geary.FolderSupport.FlagFilter filter,
+        Geary.Email.Field required_fields,
+        GLib.Cancellable? cancellable = null
+    ) throws GLib.Error {
+        return yield object_call_async<Gee.Collection<Geary.Email>>(
+            "search_flag_async",
+            {box_arg(filter), box_arg(required_fields), cancellable},
+            Gee.Collection.empty<Geary.Email>()
         );
     }
 

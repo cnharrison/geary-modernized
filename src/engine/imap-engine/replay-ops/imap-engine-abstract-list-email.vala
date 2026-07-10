@@ -18,6 +18,7 @@ private abstract class Geary.ImapEngine.AbstractListEmail : Geary.ImapEngine.Sen
         public Imap.MessageSet msg_set;
         public Geary.Email.Field unfulfilled_fields;
         public Geary.Email.Field required_fields;
+        public Gee.Set<Imap.UID>? completion_uids;
         public bool update_unread;
 
         // OUT
@@ -31,6 +32,7 @@ private abstract class Geary.ImapEngine.AbstractListEmail : Geary.ImapEngine.Sen
                                     Imap.MessageSet msg_set,
                                     Geary.Email.Field unfulfilled_fields,
                                     Geary.Email.Field required_fields,
+                                    Gee.Set<Imap.UID>? completion_uids,
                                     bool update_unread,
                                     ContactHarvester harvester) {
             this.remote = remote;
@@ -38,6 +40,7 @@ private abstract class Geary.ImapEngine.AbstractListEmail : Geary.ImapEngine.Sen
             this.msg_set = msg_set;
             this.unfulfilled_fields = unfulfilled_fields;
             this.required_fields = required_fields;
+            this.completion_uids = completion_uids;
             this.update_unread = update_unread;
             this.harvester = harvester;
         }
@@ -66,11 +69,13 @@ private abstract class Geary.ImapEngine.AbstractListEmail : Geary.ImapEngine.Sen
                 if (created_or_merged.get(email))
                     created_ids.add(email.id);
 
-                // if remote email doesn't fulfills all required fields, fetch full and return that
-                // TODO: Need a sparse ID fetch in ImapDB.Folder to do this all at once
-                if (!email.fields.fulfills(required_fields)) {
+                // Complete result emails from the merged local copy.
+                // Vector-expansion neighbors only need database fields.
+                ImapDB.EmailIdentifier id = (ImapDB.EmailIdentifier) email.id;
+                if (should_complete_list_result(id.uid, this.completion_uids) &&
+                    !email.fields.fulfills(required_fields)) {
                     email = yield this.local.fetch_email_async(
-                        (ImapDB.EmailIdentifier) email.id,
+                        id,
                         required_fields,
                         ImapDB.Folder.ListFlags.NONE,
                         cancellable
@@ -91,6 +96,7 @@ private abstract class Geary.ImapEngine.AbstractListEmail : Geary.ImapEngine.Sen
     protected Geary.Email.Field required_fields;
     protected Cancellable? cancellable;
     protected Folder.ListFlags flags;
+    protected Gee.Set<Imap.UID>? completion_uids = null;
 
     private Gee.HashMap<Imap.UID, Geary.Email.Field> unfulfilled = new Gee.HashMap<Imap.UID, Geary.Email.Field>();
 
@@ -186,6 +192,7 @@ private abstract class Geary.ImapEngine.AbstractListEmail : Geary.ImapEngine.Sen
                     msg_set,
                     unfulfilled_fields,
                     required_fields,
+                    this.completion_uids,
                     !this.flags.is_any_set(NO_UNREAD_UPDATE),
                     this.owner.harvester
                 );

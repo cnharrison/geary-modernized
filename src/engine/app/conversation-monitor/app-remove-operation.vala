@@ -34,6 +34,9 @@ private class Geary.App.RemoveOperation : BatchOperation<EmailIdentifier> {
             removed,
             trimmed
         );
+        this.monitor.prune_flag_filter_matches(
+            source_folder, batch, removed, trimmed
+        );
 
         this.monitor.removed(
             removed,

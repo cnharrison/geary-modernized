@@ -40,11 +40,27 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
         get; set; default = new Gee.HashSet<Geary.App.Conversation>();
     }
 
+    public bool has_source { get; private set; default = false; }
+
+    public FilterMode filter_mode {
+        get { return this._filter_mode; }
+        set {
+            if (this._filter_mode != value) {
+                this._filter_mode = value;
+                apply_filter_mode();
+                notify_property("filter-mode");
+            }
+        }
+    }
+    private FilterMode _filter_mode = ALL;
+
     private Application.Configuration config;
+    private ConversationSource? source = null;
     private bool show_account_context = false;
     private bool selecting_last_conversation = false;
     private bool follow_last_conversation_after_load = false;
     private bool suppress_next_load_more = false;
+    private bool selection_is_interactive = true;
 
     private Gtk.GestureMultiPress press_gesture;
     private Gtk.GestureLongPress long_press_gesture;
@@ -52,6 +68,7 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
     private Gdk.ModifierType last_modifier_type;
 
     [GtkChild] private unowned Gtk.ListBox list;
+    private Gtk.Label empty_placeholder;
 
     /*
      * Use to restore selected row when exiting selection/edition
@@ -66,6 +83,15 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
         this.list.selected_rows_changed.connect(on_selected_rows_changed);
         this.list.row_activated.connect(on_row_activated);
 
+        this.empty_placeholder = new Gtk.Label(null);
+        this.empty_placeholder.justify = Gtk.Justification.CENTER;
+        this.empty_placeholder.margin = 24;
+        this.empty_placeholder.visible = true;
+        this.empty_placeholder.wrap = true;
+        this.empty_placeholder.get_style_context().add_class("dim-label");
+        this.list.set_placeholder(this.empty_placeholder);
+        update_empty_placeholder();
+
         this.list.set_header_func(header_func);
 
         this.vadjustment.value_changed.connect(maybe_load_more);
@@ -73,7 +99,10 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
 
         this.press_gesture = new Gtk.GestureMultiPress(this.list);
         this.press_gesture.set_button(0);
+        this.press_gesture.propagation_phase = CAPTURE;
+        this.press_gesture.pressed.connect(on_press_gesture_pressed);
         this.press_gesture.released.connect(on_press_gesture_released);
+        this.press_gesture.cancel.connect(on_press_gesture_cancelled);
 
         this.long_press_gesture = new Gtk.GestureLongPress(this.list);
         this.long_press_gesture.propagation_phase = CAPTURE;
@@ -96,6 +125,14 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
 
     static construct {
         set_css_name("conversation-list");
+    }
+
+    internal static bool is_pointer_selection_interactive(uint button) {
+        return button == Gdk.BUTTON_PRIMARY;
+    }
+
+    internal static bool allows_automatic_selection(FilterMode filter_mode) {
+        return filter_mode == ALL;
     }
 
     // -------
@@ -145,20 +182,57 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
     internal void set_source(ConversationSource? source,
                              bool show_account_context = false) {
         this.show_account_context = show_account_context;
+        this.has_source = source != null;
         if (this.model != null) {
             this.model.conversations_loaded.disconnect(on_conversations_loaded);
             this.model.conversations_removed.disconnect(on_conversations_removed);
             this.model.conversation_updated.disconnect(on_conversation_updated);
         }
+
+        this.source = source;
         if (source == null) {
             this.model = null;
             this.list.bind_model(null, row_factory);
         } else {
             this.model = new Model(source);
+            this.model.filter_mode = this.filter_mode;
             this.list.bind_model(this.model, row_factory);
             this.model.conversations_loaded.connect(on_conversations_loaded);
             this.model.conversations_removed.connect(on_conversations_removed);
             this.model.conversation_updated.connect(on_conversation_updated);
+        }
+        update_empty_placeholder();
+    }
+
+    private void apply_filter_mode() {
+        this.list.unselect_all();
+        if (this.model != null) {
+            this.model.filter_mode = this.filter_mode;
+        }
+        update_empty_placeholder();
+    }
+
+    private void update_empty_placeholder() {
+        this.empty_placeholder.visible = this.has_source;
+        if (!this.has_source) {
+            return;
+        }
+
+        switch (this.filter_mode) {
+        case ALL:
+            this.empty_placeholder.label = _("No conversations");
+            break;
+
+        case UNREAD:
+            this.empty_placeholder.label = _("No unread conversations");
+            break;
+
+        case STARRED:
+            this.empty_placeholder.label = _("No starred conversations");
+            break;
+
+        default:
+            assert_not_reached();
         }
     }
 
@@ -423,9 +497,14 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
     // -------------------
 
     /**
-     * Emitted when one or more conversations are selected
+     * Emitted when one or more conversations are selected.
+     *
+     * Selection is interactive when it should allow auto-marking as read.
      */
-    public signal void conversations_selected(Gee.Set<Geary.App.Conversation> selected);
+    public signal void conversations_selected(
+        Gee.Set<Geary.App.Conversation> selected,
+        bool is_interactive
+    );
 
     /**
      * Emitted when one conversation is activated
@@ -661,7 +740,8 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
         if (this.follow_last_conversation_after_load) {
             this.follow_last_conversation_after_load = false;
             select_last_loaded_conversation(true);
-        } else if (this.config.autoselect &&
+        } else if (allows_automatic_selection(this.filter_mode) &&
+                   this.config.autoselect &&
                    !this.should_inhibit_autoactivate &&
                    this.list.get_selected_rows().length() == 0) {
 
@@ -678,14 +758,17 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
      * Select next conversation
      */
     private void on_conversations_removed(bool start) {
+        bool restore_selection = allows_automatic_selection(this.filter_mode);
+        if (start && !restore_selection) {
+            this.to_restore_row = null;
         // Before model update, just find a conversation
-        if (this.config.autoselect && start) {
+        } else if (this.config.autoselect && start) {
             this.to_restore_row = get_next_conversation();
         // If in selection mode, leaving will do the job
         } else if (this.selection_mode_enabled) {
             this.selection_mode_enabled = false;
         // Set next conversation
-        } else if (this.config.autoselect &&
+        } else if (restore_selection && this.config.autoselect &&
                    this.list.get_selected_rows().length() == 0) {
             restore_row();
         }
@@ -707,14 +790,21 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
     // Gestures
     // ----------
 
+    private void on_press_gesture_pressed(int n_press, double x, double y) {
+        this.selection_is_interactive = is_pointer_selection_interactive(
+            this.press_gesture.get_current_button()
+        );
+    }
+
     private void on_press_gesture_released(int n_press, double x, double y) {
         var row = (Row) this.list.get_row_at_y((int) y);
-
-        if (row == null)
+        if (row == null) {
+            reset_pointer_selection();
             return;
+        }
 
         var button = this.press_gesture.get_current_button();
-        if (button == 1) {
+        if (button == Gdk.BUTTON_PRIMARY) {
             Gdk.EventSequence sequence = this.press_gesture.get_current_sequence();
             Gdk.Event event = this.press_gesture.get_last_event(sequence);
             event.get_state(out this.last_modifier_type);
@@ -725,12 +815,12 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
                         Gdk.ModifierType.CONTROL_MASK) {
                     this.selection_mode_enabled = true;
                 } else {
-                    conversation_activated(((Row) row).conversation, 1);
+                    conversation_activated(row.conversation, Gdk.BUTTON_PRIMARY);
                 }
             }
-        } else if (button == 2) {
-            conversation_activated(row.conversation, 2);
-        } else if (button == 3) {
+        } else if (button == Gdk.BUTTON_MIDDLE) {
+            conversation_activated(row.conversation, Gdk.BUTTON_MIDDLE);
+        } else if (button == Gdk.BUTTON_SECONDARY) {
             var rect = Gdk.Rectangle();
             row.translate_coordinates(this.list, 0, 0, out rect.x, out rect.y);
             rect.x = (int) x;
@@ -738,6 +828,15 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
             rect.width = rect.height = 0;
             context_menu(row, rect);
         }
+        reset_pointer_selection();
+    }
+
+    private void on_press_gesture_cancelled(Gdk.EventSequence? sequence) {
+        reset_pointer_selection();
+    }
+
+    private void reset_pointer_selection() {
+        this.selection_is_interactive = true;
     }
 
     private bool on_key_event_controller_key_pressed(uint keyval, uint keycode, Gdk.ModifierType modifier_type) {
@@ -819,7 +918,10 @@ public class ConversationList.View : Gtk.ScrolledWindow, Geary.BaseInterface {
 
         this.selected = selected;
         if (this.selected.size > 0 || this.to_restore_row == null) {
-            conversations_selected(this.selected);
+            conversations_selected(
+                this.selected,
+                this.selection_is_interactive
+            );
         }
     }
 

@@ -26,7 +26,8 @@
  * restored.
  */
 private class Geary.ImapEngine.MinimalFolder : Geary.Folder, Geary.FolderSupport.Copy,
-    Geary.FolderSupport.Mark, Geary.FolderSupport.Move {
+    Geary.FolderSupport.Mark, Geary.FolderSupport.Move,
+    Geary.FolderSupport.Search {
 
 
     private const int FLAG_UPDATE_TIMEOUT_SEC = 2;
@@ -1279,6 +1280,24 @@ private class Geary.ImapEngine.MinimalFolder : Geary.Folder, Geary.FolderSupport
         yield op.wait_for_ready_async(cancellable);
 
         return !op.accumulator.is_empty ? op.accumulator : null;
+    }
+
+    public async Gee.Collection<Geary.Email> search_flag_async(
+        FolderSupport.FlagFilter filter,
+        Geary.Email.Field required_fields,
+        Cancellable? cancellable = null
+    ) throws Error {
+        check_open("search_flag_async");
+
+        ServerSearchEmail op = new ServerSearchEmail(
+            this,
+            get_flag_search_criteria(filter),
+            required_fields,
+            cancellable
+        );
+        this.replay_queue.schedule(op);
+        yield op.wait_for_ready_async(cancellable);
+        return op.accumulator;
     }
 
     public override async Geary.Email fetch_email_async(Geary.EmailIdentifier id,

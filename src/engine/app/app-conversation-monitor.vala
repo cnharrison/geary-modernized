@@ -101,7 +101,7 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
     /** Determines if more conversations can be loaded. */
     public bool can_load_more {
         get {
-            return (
+            return !this.has_flag_filter && (
                 this.base_folder.properties.email_total >
                 this.folder_window_size
             ) && !this.fill_complete;
@@ -157,6 +157,8 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
     private bool base_was_opened = false;
 
     private Geary.Email.Field required_fields;
+    private bool has_flag_filter = false;
+    private FolderSupport.FlagFilter flag_filter = FolderSupport.FlagFilter.UNREAD;
     private ConversationOperationQueue queue;
     private GLib.Cancellable operation_cancellable = new GLib.Cancellable();
 
@@ -172,6 +174,8 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
         new Gee.TreeSet<EmailIdentifier>((a,b) => {
             return a.natural_sort_comparator(b);
         });
+    private Gee.Set<EmailIdentifier> flag_filter_matches =
+        new Gee.HashSet<EmailIdentifier>();
 
 
     /**
@@ -284,6 +288,23 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
     public ConversationMonitor(Folder base_folder,
                                Email.Field required_fields,
                                int min_window_count) {
+        initialize(base_folder, required_fields, min_window_count);
+    }
+
+    /** Creates a monitor seeded by a complete server-side flag search. */
+    public ConversationMonitor.with_flag_filter(
+        Folder base_folder,
+        Email.Field required_fields,
+        FolderSupport.FlagFilter flag_filter
+    ) {
+        initialize(base_folder, required_fields, 0);
+        this.has_flag_filter = true;
+        this.flag_filter = flag_filter;
+    }
+
+    private void initialize(Folder base_folder,
+                            Email.Field required_fields,
+                            int min_window_count) {
         this.base_folder = base_folder;
         this.required_fields = required_fields | REQUIRED_FIELDS;
         this._min_window_count = min_window_count;
@@ -330,7 +351,11 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
         this.base_folder.account.email_flags_changed.connect(on_account_email_flags_changed);
 
         this.queue.operation_error.connect(on_operation_error);
-        this.queue.add(new FillWindowOperation(this));
+        if (this.has_flag_filter) {
+            this.queue.add(new FlagFilterOperation(this));
+        } else {
+            this.queue.add(new FillWindowOperation(this));
+        }
 
         // Take the union of the two cancellables so that of the
         // monitor is closed while it is opening, the folder open is
@@ -476,6 +501,87 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
         return flags;
     }
 
+    /** Loads every message matching this monitor's flag filter. */
+    internal async void load_flag_filter_async() throws Error {
+        FolderSupport.Search? searchable =
+            this.base_folder as FolderSupport.Search;
+        if (searchable == null) {
+            throw new EngineError.UNSUPPORTED(
+                "Folder does not support server-side flag searches"
+            );
+        }
+
+        notify_scan_started();
+        GLib.Error? scan_error = null;
+        try {
+            Gee.Collection<Email> messages = yield searchable.search_flag_async(
+                this.flag_filter,
+                this.required_fields,
+                this.operation_cancellable
+            );
+            Gee.List<Email> matching = collect_flag_filter_matches(messages);
+            if (!matching.is_empty) {
+                yield process_email_async(matching, ProcessJobContext());
+            }
+        } catch (GLib.Error err) {
+            scan_error = err;
+        }
+        this.fill_complete = true;
+        notify_scan_completed();
+
+        if (scan_error != null) {
+            throw scan_error;
+        }
+    }
+
+    /** Loads newly available messages that match this monitor's filter. */
+    internal async void load_flag_filter_ids_async(
+        Gee.Collection<EmailIdentifier> ids
+    ) throws Error {
+        notify_scan_started();
+        GLib.Error? scan_error = null;
+        try {
+            Gee.List<Email>? candidates =
+                yield this.base_folder.list_email_by_sparse_id_async(
+                    ids,
+                    Email.Field.FLAGS,
+                    Folder.ListFlags.NONE,
+                    this.operation_cancellable
+                );
+            var matching_ids = new Gee.HashSet<EmailIdentifier>();
+            if (candidates != null) {
+                foreach (Email email in candidates) {
+                    if (email_matches_flag_filter(email)) {
+                        matching_ids.add(email.id);
+                    }
+                }
+            }
+
+            if (!matching_ids.is_empty) {
+                Gee.List<Email>? messages =
+                    yield this.base_folder.list_email_by_sparse_id_async(
+                        matching_ids,
+                        this.required_fields,
+                        Folder.ListFlags.NONE,
+                        this.operation_cancellable
+                    );
+                Gee.List<Email> matching = messages != null
+                    ? collect_flag_filter_matches(messages)
+                    : new Gee.ArrayList<Email>();
+                if (!matching.is_empty) {
+                    yield process_email_async(matching, ProcessJobContext());
+                }
+            }
+        } catch (GLib.Error err) {
+            scan_error = err;
+        }
+        notify_scan_completed();
+
+        if (scan_error != null) {
+            throw scan_error;
+        }
+    }
+
     /** Loads messages from the base folder into the window. */
     internal async int load_by_id_async(EmailIdentifier? initial_id,
                                         int count,
@@ -612,6 +718,32 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
         }
     }
 
+    /** Drops filtered conversations that no longer have a matching anchor. */
+    internal void prune_flag_filter_matches(
+        Folder source_folder,
+        Gee.Collection<EmailIdentifier> removed_ids,
+        Gee.Collection<Conversation> removed,
+        Gee.MultiMap<Conversation,Email> trimmed
+    ) {
+        if (!this.has_flag_filter || source_folder != this.base_folder) {
+            return;
+        }
+
+        this.flag_filter_matches.remove_all(removed_ids);
+        this.window.remove_all(removed_ids);
+        var stale = new Gee.ArrayList<Conversation>();
+        foreach (Conversation conversation in this.conversations.read_only_view) {
+            if (!conversation_has_flag_filter_match(conversation)) {
+                stale.add(conversation);
+            }
+        }
+        foreach (Conversation conversation in stale) {
+            this.conversations.remove_conversation(conversation);
+            trimmed.remove_all(conversation);
+            removed.add(conversation);
+        }
+    }
+
    /** Notifies of removed conversations and removes emails from the window. */
    internal void removed(Gee.Collection<Conversation> removed,
                          Gee.MultiMap<Conversation, Email> trimmed,
@@ -626,6 +758,7 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
 
         if (base_folder_removed != null) {
             this.window.remove_all(base_folder_removed);
+            this.flag_filter_matches.remove_all(base_folder_removed);
         }
     }
 
@@ -830,22 +963,35 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
     }
 
     private void on_folder_opened(Geary.Folder.OpenState state, int count) {
-        if (state == Geary.Folder.OpenState.REMOTE)
+        if (state == Geary.Folder.OpenState.REMOTE && !this.has_flag_filter) {
             this.queue.add(new ReseedOperation(this));
+        }
     }
 
     private void on_folder_email_appended(Gee.Collection<EmailIdentifier> appended) {
-        this.queue.add(new AppendOperation(this, appended));
+        if (this.has_flag_filter) {
+            this.queue.add(new FlagFilterAppendOperation(this, appended));
+        } else {
+            this.queue.add(new AppendOperation(this, appended));
+        }
     }
 
     private void on_folder_email_complete(Gee.Collection<EmailIdentifier> completed) {
-        // InsertOperation will add the emails only if they are after
-        // the earliest, which is what we want here.
-        this.queue.add(new InsertOperation(this, completed));
+        if (this.has_flag_filter) {
+            this.queue.add(new FlagFilterAppendOperation(this, completed));
+        } else {
+            // InsertOperation will add the emails only if they are after
+            // the earliest, which is what we want here.
+            this.queue.add(new InsertOperation(this, completed));
+        }
     }
 
     private void on_folder_email_inserted(Gee.Collection<EmailIdentifier> inserted) {
-        this.queue.add(new InsertOperation(this, inserted));
+        if (this.has_flag_filter) {
+            this.queue.add(new FlagFilterAppendOperation(this, inserted));
+        } else {
+            this.queue.add(new InsertOperation(this, inserted));
+        }
     }
 
     private void on_folder_email_removed(Gee.Collection<EmailIdentifier> removed) {
@@ -888,6 +1034,11 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
 
     private void on_account_email_flags_changed(Geary.Folder folder,
                                                 Gee.Map<EmailIdentifier,EmailFlags> map) {
+        if (this.has_flag_filter && folder == this.base_folder) {
+            on_flag_filter_flags_changed(map);
+            return;
+        }
+
         Gee.HashSet<EmailIdentifier> inserted_ids = new Gee.HashSet<EmailIdentifier>();
         Gee.HashSet<EmailIdentifier> removed_ids = new Gee.HashSet<EmailIdentifier>();
         Gee.HashSet<Conversation> removed_conversations = new Gee.HashSet<Conversation>();
@@ -951,6 +1102,99 @@ public class Geary.App.ConversationMonitor : BaseObject, Logging.Source {
             new Gee.HashMultiMap<Conversation, Email>(),
             (folder == this.base_folder) ? removed_ids : null
         );
+    }
+
+    private void on_flag_filter_flags_changed(
+        Gee.Map<EmailIdentifier,EmailFlags> changed
+    ) {
+        var affected = new Gee.HashSet<Conversation>();
+        var inserted = new Gee.HashSet<EmailIdentifier>();
+        foreach (EmailIdentifier id in changed.keys) {
+            Conversation? conversation =
+                this.conversations.get_by_email_identifier(id);
+            if (conversation != null) {
+                Email? email = conversation.get_email_by_id(id);
+                if (email != null) {
+                    email.set_flags(changed.get(id));
+                    notify_email_flags_changed(conversation, email);
+                }
+            }
+
+            if (matches_flag_filter(changed.get(id))) {
+                if (this.flag_filter_matches.add(id) && conversation == null) {
+                    inserted.add(id);
+                }
+            } else if (this.flag_filter_matches.remove(id)) {
+                this.window.remove(id);
+                if (conversation != null) {
+                    affected.add(conversation);
+                }
+            }
+        }
+
+        var removed = new Gee.HashSet<Conversation>();
+        foreach (Conversation conversation in affected) {
+            if (!conversation_has_flag_filter_match(conversation)) {
+                this.conversations.remove_conversation(conversation);
+                removed.add(conversation);
+            }
+        }
+        if (!removed.is_empty) {
+            notify_conversations_removed(removed);
+        }
+        if (!inserted.is_empty) {
+            this.queue.add(new AppendOperation(this, inserted));
+        }
+    }
+
+    private Gee.List<Email> collect_flag_filter_matches(
+        Gee.Collection<Email> messages
+    ) throws EngineError.INCOMPLETE_MESSAGE {
+        var matching = new Gee.ArrayList<Email>();
+        foreach (Email email in messages) {
+            if (email_matches_flag_filter(email)) {
+                this.window.add(email.id);
+                this.flag_filter_matches.add(email.id);
+                matching.add(email);
+            }
+        }
+        return matching;
+    }
+
+    private bool email_matches_flag_filter(Email email)
+        throws EngineError.INCOMPLETE_MESSAGE {
+        if (email.email_flags == null) {
+            throw new EngineError.INCOMPLETE_MESSAGE(
+                "Flag-filtered message has no flags"
+            );
+        }
+        return matches_flag_filter(email.email_flags);
+    }
+
+    private bool conversation_has_flag_filter_match(
+        Conversation conversation
+    ) {
+        foreach (EmailIdentifier id in conversation.get_email_ids()) {
+            if (this.flag_filter_matches.contains(id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private bool matches_flag_filter(EmailFlags flags) {
+        if (flags.is_deleted()) {
+            return false;
+        }
+
+        switch (this.flag_filter) {
+        case UNREAD:
+            return flags.is_unread();
+        case STARRED:
+            return flags.is_flagged();
+        default:
+            assert_not_reached();
+        }
     }
 
     private void on_operation_error(ConversationOperation op, Error err) {

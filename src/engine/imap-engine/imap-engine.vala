@@ -6,6 +6,53 @@
 
 namespace Geary.ImapEngine {
 
+    internal bool should_complete_list_result(
+        Imap.UID? uid,
+        Gee.Set<Imap.UID>? completion_uids
+    ) {
+        return completion_uids == null ||
+            (uid != null && completion_uids.contains(uid));
+    }
+
+    internal Email.Field get_server_search_new_email_fields(
+        Email.Field requested_fields
+    ) {
+        return requested_fields | ImapDB.Folder.REQUIRED_FIELDS;
+    }
+
+    internal void retain_server_search_results(
+        Gee.Collection<Email> emails,
+        Gee.Set<Imap.UID> matching_uids
+    ) {
+        Collection.remove_if<Email>(emails, (email) => {
+            ImapDB.EmailIdentifier id = (ImapDB.EmailIdentifier) email.id;
+            return id.uid == null || !matching_uids.contains(id.uid);
+        });
+    }
+
+    internal Imap.SearchCriteria get_flag_search_criteria(
+        FolderSupport.FlagFilter filter
+    ) throws ImapError {
+        Imap.SearchCriterion criterion;
+        switch (filter) {
+        case UNREAD:
+            criterion = Imap.SearchCriterion.has_not_flag(
+                Imap.MessageFlag.SEEN
+            );
+            break;
+
+        case STARRED:
+            criterion = Imap.SearchCriterion.has_flag(
+                Imap.MessageFlag.FLAGGED
+            );
+            break;
+
+        default:
+            assert_not_reached();
+        }
+        return new Imap.SearchCriteria(criterion);
+    }
+
     /**
      * Determines if retrying an operation might succeed or not.
      *

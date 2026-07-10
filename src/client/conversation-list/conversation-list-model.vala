@@ -6,10 +6,31 @@
  * (version 2.1 or later). See the COPYING file in this distribution.
  */
 
+public enum ConversationList.FilterMode {
+    ALL,
+    UNREAD,
+    STARRED
+}
+
 // The whole goal of this class to wrap the ConversationMonitor with a view that presents a sorted list
 public class ConversationList.Model : Object, ListModel {
     internal GLib.GenericArray<Geary.App.Conversation> items = new GLib.GenericArray<Geary.App.Conversation>();
+    private GLib.GenericArray<Geary.App.Conversation> loaded_items = new GLib.GenericArray<Geary.App.Conversation>();
+    private Gee.List<FlagSignalBinding> flag_signal_bindings =
+        new Gee.ArrayList<FlagSignalBinding>();
     internal ConversationSource source { get; set; }
+
+    public FilterMode filter_mode {
+        get { return this._filter_mode; }
+        set {
+            if (this._filter_mode != value) {
+                this._filter_mode = value;
+                rebuild_items();
+                notify_property("filter-mode");
+            }
+        }
+    }
+    private FilterMode _filter_mode = ALL;
 
     public bool can_load_more {
         get { return this.source.can_load_more; }
@@ -35,6 +56,7 @@ public class ConversationList.Model : Object, ListModel {
         this.source.conversations_removed.disconnect(on_conversations_removed);
         this.source.scan_started.disconnect(on_scan_started);
         this.source.scan_completed.disconnect(on_scan_completed);
+        disconnect_all_conversations();
     }
 
     public signal void conversations_added(bool start);
@@ -107,61 +129,102 @@ public class ConversationList.Model : Object, ListModel {
             return false;
         }
 
-        this.items.add(convo);
+        if (this.loaded_items.find(convo)) {
+            return false;
+        }
+
+        this.loaded_items.add(convo);
+        connect_conversation(convo);
 
         return true;
     }
 
-    private GenericArray<uint> conversations_indexes(Gee.Collection<Geary.App.Conversation> conversations) {
-        GenericArray<uint> indexes = new GenericArray<uint>();
-        uint index;
+    private bool matches_filter(Geary.App.Conversation conversation) {
+        switch (this.filter_mode) {
+        case ALL:
+            return true;
 
-        foreach (Geary.App.Conversation convo in conversations) {
-            if (this.items.find(convo, out index)) {
-                indexes.add(index);
-            }
-        }
+        case UNREAD:
+            return conversation.is_unread();
 
-        return indexes;
-    }
+        case STARRED:
+            return conversation.is_flagged();
 
-    private void update_added(GenericArray<uint> indexes) {
-        indexes.sort((a, b) => {
-            return (int) (a > b) - (int) (a < b);
-        });
-
-        while (indexes.length > 0) {
-            uint? last_index = null;
-            uint count = 0;
-            foreach (unowned uint index in indexes) {
-                if (last_index != null && index > last_index + 1) {
-                    break;
-                }
-                last_index = (int) index;
-                count++;
-            }
-            this.items_changed(indexes[0], 0, count);
-            indexes.remove_range(0, count);
+        default:
+            assert_not_reached();
         }
     }
 
-    private void update_removed(GenericArray<uint> indexes) {
-        indexes.sort((a, b) => {
-            return (int) (a < b) - (int) (a > b);
-        });
-
-        while (indexes.length > 0) {
-            uint? last_index = null;
-            uint count = 0;
-            foreach (unowned uint index in indexes) {
-                if (last_index != null && index < last_index - 1) {
-                    break;
-                }
-                last_index = index;
-                count++;
+    private void rebuild_items() {
+        uint old_count = this.items.length;
+        this.items = new GLib.GenericArray<Geary.App.Conversation>();
+        for (uint i = 0; i < this.loaded_items.length; i++) {
+            Geary.App.Conversation conversation = this.loaded_items.get(i);
+            if (matches_filter(conversation)) {
+                this.items.add(conversation);
             }
-            this.items_changed(last_index, count, 0);
-            indexes.remove_range(0, count);
+        }
+        this.items.sort(compare);
+
+        if (old_count > 0 || this.items.length > 0) {
+            this.items_changed(0, old_count, this.items.length);
+        }
+    }
+
+    private void connect_conversation(Geary.App.Conversation conversation) {
+        if (get_flag_signal_binding(conversation) == null) {
+            this.flag_signal_bindings.add(
+                new FlagSignalBinding(
+                    conversation,
+                    conversation.email_flags_changed.connect(
+                        on_conversation_flags_changed
+                    )
+                )
+            );
+        }
+    }
+
+    private void disconnect_conversation(Geary.App.Conversation conversation) {
+        FlagSignalBinding? binding = get_flag_signal_binding(conversation);
+        if (binding != null) {
+            if (GLib.SignalHandler.is_connected(
+                binding.conversation, binding.signal_id
+            )) {
+                binding.conversation.disconnect(binding.signal_id);
+            }
+            this.flag_signal_bindings.remove(binding);
+        }
+    }
+
+    private void disconnect_all_conversations() {
+        while (!this.flag_signal_bindings.is_empty) {
+            disconnect_conversation(this.flag_signal_bindings[0].conversation);
+        }
+    }
+
+    private FlagSignalBinding? get_flag_signal_binding(
+        Geary.App.Conversation conversation
+    ) {
+        foreach (FlagSignalBinding binding in this.flag_signal_bindings) {
+            if (binding.conversation == conversation) {
+                return binding;
+            }
+        }
+        return null;
+    }
+
+    private void on_conversation_flags_changed(Geary.Email email) {
+        rebuild_items();
+    }
+
+    private class FlagSignalBinding {
+        public Geary.App.Conversation conversation;
+        public ulong signal_id;
+
+        public FlagSignalBinding(Geary.App.Conversation conversation,
+                                 ulong signal_id) {
+            this.conversation = conversation;
+            this.signal_id = signal_id;
         }
     }
 
@@ -176,10 +239,7 @@ public class ConversationList.Model : Object, ListModel {
                 added++;
             }
         }
-        this.items.sort(compare);
-
-        GenericArray<uint> indexes = conversations_indexes(conversations);
-        update_added(indexes);
+        rebuild_items();
 
         conversations_added(false);
 
@@ -187,19 +247,19 @@ public class ConversationList.Model : Object, ListModel {
     }
 
     private void on_conversations_removed(Gee.Collection<Geary.App.Conversation> conversations) {
-        GenericArray<uint> indexes = conversations_indexes(conversations);
-
         debug("Removing %d conversations.", conversations.size);
 
         conversations_removed(true);
 
         var removed = 0;
         foreach (Geary.App.Conversation convo in conversations) {
-            this.items.remove(convo);
-            removed++;
+            if (this.loaded_items.remove(convo)) {
+                disconnect_conversation(convo);
+                removed++;
+            }
         }
 
-        update_removed(indexes);
+        rebuild_items();
 
         conversations_removed(false);
 
@@ -209,21 +269,8 @@ public class ConversationList.Model : Object, ListModel {
     private void on_conversation_updated(ConversationSource sender, Geary.App.Conversation convo, Gee.Collection<Geary.Email> emails) {
         conversation_updated(convo);
 
-        uint initial_index;
-        if (!this.items.find(convo, out initial_index)) {
-            return;
+        if (this.loaded_items.find(convo)) {
+            rebuild_items();
         }
-
-        this.items.sort(compare);
-
-        uint final_index;
-        if (!this.items.find(convo, out final_index) || initial_index == final_index) {
-            return;
-        }
-
-        uint count = initial_index > final_index ?
-            initial_index + 1 - final_index :
-            final_index + 1 - initial_index;
-        this.items_changed(uint.min(initial_index, final_index), count, count);
     }
 }

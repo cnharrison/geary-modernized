@@ -8,10 +8,10 @@
 public class Mock.FolderPoperties : Geary.FolderProperties {
 
 
-    public FolderPoperties() {
+    public FolderPoperties(int email_total = 0, int email_unread = 0) {
         base(
-            0,
-            0,
+            email_total,
+            email_unread,
             Geary.Trillian.UNKNOWN,
             Geary.Trillian.UNKNOWN,
             Geary.Trillian.UNKNOWN,

@@ -246,13 +246,15 @@ public class ConversationList.SourceTest : TestCase {
         return new Mock.Account(info);
     }
 
-    private Mock.Folder new_folder(string account_label, Mock.Account account) {
+    private Mock.Folder new_folder(string account_label,
+                                   Mock.Account account) {
+        Geary.Folder.SpecialUse use = Geary.Folder.SpecialUse.INBOX;
         Geary.FolderRoot root = new Geary.FolderRoot("#" + account_label, false);
         return new Mock.Folder(
             account,
             new Mock.FolderPoperties(),
-            root.get_child(Geary.Folder.SpecialUse.INBOX.to_string()),
-            Geary.Folder.SpecialUse.INBOX,
+            root.get_child(use.to_string()),
+            use,
             null
         );
     }

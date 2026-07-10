@@ -24,6 +24,11 @@ class Geary.App.ConversationMonitorTest : TestCase {
         add_test("close_after_open_error", close_after_open_error);
         add_test("load_single_message", load_single_message);
         add_test("load_multiple_messages", load_multiple_messages);
+        add_test("load_all_flag_matches", load_all_flag_matches);
+        add_test("load_empty_flag_filter", load_empty_flag_filter);
+        add_test("remove_non_matching_flag_result", remove_non_matching_flag_result);
+        add_test("append_matching_flag_result", append_matching_flag_result);
+        add_test("ignore_non_matching_flag_result", ignore_non_matching_flag_result);
         add_test("load_related_message", load_related_message);
         add_test("base_folder_message_appended", base_folder_message_appended);
         add_test("base_folder_message_removed", base_folder_message_removed);
@@ -215,6 +220,128 @@ class Geary.App.ConversationMonitorTest : TestCase {
         assert_equal<int?>(monitor.size, 3, "Conversation count");
         assert_non_null(monitor.window_lowest, "Lowest window id");
         assert_equal(monitor.window_lowest, e1.id, "Lowest window id");
+    }
+
+    public void load_all_flag_matches() throws Error {
+        Email e1 = setup_email(1);
+        Email e2 = setup_email(2);
+        Email e3 = setup_email(3);
+        Email[] matches = { e3, e2, e1 };
+        foreach (Email email in matches) {
+            email.set_flags(new EmailFlags.with(EmailFlags.UNREAD));
+        }
+
+        Gee.MultiMap<EmailIdentifier,FolderPath> paths =
+            new Gee.HashMultiMap<EmailIdentifier,FolderPath>();
+        foreach (Email email in matches) {
+            paths.set(email.id, this.base_folder.path);
+        }
+
+        ConversationMonitor monitor = setup_flag_filter_monitor(
+            matches, paths, FolderSupport.FlagFilter.UNREAD
+        );
+
+        assert_equal<int?>(monitor.size, 3, "Conversation count");
+        assert_false(monitor.can_load_more, "Filtered monitor can load more");
+        assert_equal<uint?>(monitor.folder_window_size, 3, "Matched email count");
+    }
+
+    public void load_empty_flag_filter() throws Error {
+        ConversationMonitor monitor = new ConversationMonitor.with_flag_filter(
+            this.base_folder,
+            Email.Field.NONE,
+            FolderSupport.FlagFilter.STARRED
+        );
+        this.base_folder.expect_call("open_async");
+        this.base_folder.expect_call("search_flag_async")
+            .returns_object(new Gee.ArrayList<Email>());
+
+        monitor.start_monitoring.begin(NONE, null, this.async_completion);
+        monitor.start_monitoring.end(async_result());
+        wait_for_signal(monitor, "scan-completed");
+
+        assert_equal<int?>(monitor.size, 0, "Conversation count");
+        assert_false(monitor.can_load_more, "Filtered monitor can load more");
+        this.base_folder.assert_expectations();
+        this.account.assert_expectations();
+    }
+
+    public void remove_non_matching_flag_result() throws Error {
+        Email email = setup_email(1);
+        email.set_flags(new EmailFlags.with(EmailFlags.UNREAD));
+
+        Gee.MultiMap<EmailIdentifier,FolderPath> paths =
+            new Gee.HashMultiMap<EmailIdentifier,FolderPath>();
+        paths.set(email.id, this.base_folder.path);
+        ConversationMonitor monitor = setup_flag_filter_monitor(
+            { email }, paths, FolderSupport.FlagFilter.UNREAD
+        );
+
+        bool removed = false;
+        monitor.conversations_removed.connect(() => { removed = true; });
+        var changed = new Gee.HashMap<EmailIdentifier,EmailFlags>();
+        changed.set(email.id, new EmailFlags());
+        this.account.email_flags_changed(this.base_folder, changed);
+
+        assert_true(removed, "Conversation removed signal");
+        assert_equal<int?>(monitor.size, 0, "Conversation count");
+        assert_null(monitor.window_lowest, "Lowest window id");
+    }
+
+    public void append_matching_flag_result() throws Error {
+        Email existing = setup_email(1);
+        existing.set_flags(new EmailFlags.with(EmailFlags.UNREAD));
+        var initial_paths = new Gee.HashMultiMap<EmailIdentifier,FolderPath>();
+        initial_paths.set(existing.id, this.base_folder.path);
+        ConversationMonitor monitor = setup_flag_filter_monitor(
+            { existing }, initial_paths, FolderSupport.FlagFilter.UNREAD
+        );
+
+        Email appended = setup_email(2);
+        appended.set_flags(new EmailFlags.with(EmailFlags.UNREAD));
+        var appended_paths = new Gee.HashMultiMap<EmailIdentifier,FolderPath>();
+        appended_paths.set(appended.id, this.base_folder.path);
+        this.base_folder.expect_call("list_email_by_sparse_id_async")
+            .returns_object(new Gee.ArrayList<Email>.wrap({ appended }));
+        this.base_folder.expect_call("list_email_by_sparse_id_async")
+            .returns_object(new Gee.ArrayList<Email>.wrap({ appended }));
+        this.account.expect_call("get_special_folder");
+        this.account.expect_call("get_special_folder");
+        this.account.expect_call("get_special_folder");
+        this.account.expect_call("local_search_message_id_async");
+        this.account.expect_call("get_containing_folders_async")
+            .returns_object(appended_paths);
+
+        this.base_folder.email_appended(
+            new Gee.ArrayList<EmailIdentifier>.wrap({ appended.id })
+        );
+        wait_for_signal(monitor, "conversations-added");
+
+        assert_equal<int?>(monitor.size, 2, "Conversation count");
+        this.base_folder.assert_expectations();
+        this.account.assert_expectations();
+    }
+
+    public void ignore_non_matching_flag_result() throws Error {
+        Email existing = setup_email(1);
+        existing.set_flags(new EmailFlags.with(EmailFlags.FLAGGED));
+        var paths = new Gee.HashMultiMap<EmailIdentifier,FolderPath>();
+        paths.set(existing.id, this.base_folder.path);
+        ConversationMonitor monitor = setup_flag_filter_monitor(
+            { existing }, paths, FolderSupport.FlagFilter.STARRED
+        );
+
+        Email appended = setup_email(2);
+        appended.set_flags(new EmailFlags());
+        this.base_folder.expect_call("list_email_by_sparse_id_async")
+            .returns_object(new Gee.ArrayList<Email>.wrap({ appended }));
+        this.base_folder.email_appended(
+            new Gee.ArrayList<EmailIdentifier>.wrap({ appended.id })
+        );
+        wait_for_signal(monitor, "scan-completed");
+
+        assert_equal<int?>(monitor.size, 1, "Conversation count");
+        this.base_folder.assert_expectations();
     }
 
     public void load_related_message() throws Error {
@@ -441,6 +568,36 @@ class Geary.App.ConversationMonitorTest : TestCase {
         email.set_email_properties(new Mock.EmailProperties(now));
         email.set_full_references(mid, null, refs_list);
         return email;
+    }
+
+    private ConversationMonitor setup_flag_filter_monitor(
+        Email[] matches,
+        Gee.MultiMap<EmailIdentifier,FolderPath> paths,
+        FolderSupport.FlagFilter filter
+    ) throws Error {
+        ConversationMonitor monitor = new ConversationMonitor.with_flag_filter(
+            this.base_folder, Email.Field.NONE, filter
+        );
+
+        this.base_folder.expect_call("open_async");
+        this.base_folder.expect_call("search_flag_async")
+            .returns_object(new Gee.ArrayList<Email>.wrap(matches));
+        this.account.expect_call("get_special_folder");
+        this.account.expect_call("get_special_folder");
+        this.account.expect_call("get_special_folder");
+        foreach (Email email in matches) {
+            this.account.expect_call("local_search_message_id_async");
+        }
+        this.account.expect_call("get_containing_folders_async")
+            .returns_object(paths);
+
+        monitor.start_monitoring.begin(NONE, null, this.async_completion);
+        monitor.start_monitoring.end(async_result());
+        wait_for_signal(monitor, "conversations-added");
+
+        this.base_folder.assert_expectations();
+        this.account.assert_expectations();
+        return monitor;
     }
 
     private ConversationMonitor

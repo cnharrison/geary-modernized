@@ -52,6 +52,7 @@ client_vala_sources = files(
 
   'components/components-attachment-pane.vala',
   'components/components-conversation-actions.vala',
+  'components/components-conversation-list-triage-bar.vala',
   'components/components-entry-undo.vala',
   'components/components-headerbar-application.vala',
   'components/components-headerbar-conversation-list.vala',
